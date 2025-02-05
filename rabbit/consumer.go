@@ -2,30 +2,97 @@ package rabbit
 
 import (
 	"context"
-	"github.com/rabbitmq/amqp091-go"
+	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel/metric"
 )
 
 type HandlerFunc func(context.Context, []byte) error
 type SetupFunc func(ch *amqp091.Channel) error
 
+type ConsumerConfig func(*Consumer) error
+
 type Consumer struct {
-	q            *amqp091.Queue
-	delivery     <-chan amqp091.Delivery
-	logger       *slog.Logger
-	handlers     map[string]HandlerFunc
-	msgsQueue    chan amqp091.Delivery
-	queueLength  int
-	workersCount int
-	queue        *amqp091.Queue
+	name           string
+	queueName      string
+	delivery       <-chan amqp091.Delivery
+	logger         *slog.Logger
+	handlers       map[string]HandlerFunc
+	msgsQueue      chan amqp091.Delivery
+	queueLength    int
+	workersCount   int
+	queue          *amqp091.Queue
+	consumeCounter metric.Int64Counter
+	successCounter metric.Int64Counter
+	failCounter    metric.Int64Counter
 }
 
-func NewRetryConsumer(l *slog.Logger, queueLength int, workersCount int, queue *amqp091.Queue, exchangeName, consumerName string) *Consumer {
-	ec := &Consumer{logger: l.With("layer", "Consumer"), handlers: map[string]HandlerFunc{},
-		queueLength: queueLength, workersCount: workersCount, msgsQueue: make(chan amqp091.Delivery), queue: queue}
+func WithQueue(queue amqp091.Queue) ConsumerConfig {
+	return func(c *Consumer) error {
+		c.queue = &queue
+		return nil
+	}
+}
 
-	return ec
+func WithHandlers(handlers map[string]HandlerFunc) ConsumerConfig {
+	return func(c *Consumer) error {
+		c.handlers = handlers
+		return nil
+	}
+}
+
+func WithOtelMetric(meter metric.Meter) ConsumerConfig {
+	return func(c *Consumer) error {
+		var err error
+
+		c.consumeCounter, err = meter.Int64Counter(fmt.Sprintf("%s.consume.total.counter", c.name))
+		if err != nil {
+			return err
+		}
+
+		c.successCounter, err = meter.Int64Counter(fmt.Sprintf("%s.consume.success.counter", c.name))
+		if err != nil {
+			return err
+		}
+
+		c.failCounter, err = meter.Int64Counter(fmt.Sprintf("%s.consume.failed.counter", c.name))
+		if err != nil {
+			return err
+		}
+
+		return nil
+	}
+}
+
+func NewRetryConsumer(
+	l *slog.Logger,
+	queueLength int,
+	workersCount int,
+	queueName string,
+	consumerName string,
+	configs ...ConsumerConfig,
+) (*Consumer, error) {
+	ec := &Consumer{
+		name:         consumerName,
+		queueName:    queueName,
+		logger:       l.With("layer", "Consumer"),
+		handlers:     map[string]HandlerFunc{},
+		queueLength:  queueLength,
+		workersCount: workersCount,
+		msgsQueue:    make(chan amqp091.Delivery),
+	}
+
+	for _, cfg := range configs {
+		err := cfg(ec)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return ec, nil
 }
 
 func (c *Consumer) RunInnerWorkers() {
@@ -35,7 +102,8 @@ func (c *Consumer) RunInnerWorkers() {
 }
 
 func (c *Consumer) Setup(ch *amqp091.Channel) error {
-	d, err := ch.Consume(c.q.Name, "", false,
+
+	d, err := ch.Consume(c.queueName, c.name, false,
 		false, false, false, nil)
 	if err != nil {
 		return err
@@ -58,34 +126,50 @@ func (c *Consumer) Worker() {
 }
 
 func (c *Consumer) innerWorker() {
-	lg := c.logger.With("method", "Worker")
+	lg := c.logger.With("method", "InnerWorker")
 	lg.Info("started Consumer inner worker")
 
 	for msg := range c.msgsQueue {
-		lg.Info("rabbit message received in msg queue go channel", slog.String("routingKey", msg.RoutingKey))
-		handler, ok := c.handlers[msg.RoutingKey]
-		if !ok {
-			lg.Warn("no handler found for routingKey", slog.String("routingKey", msg.RoutingKey))
-			if err := msg.Ack(false); err != nil {
-				lg.Error("failed to ack message", slog.Any("error", err))
+		func() {
+			lg.Info("rabbit message received in msg queue go channel", slog.String("routingKey", msg.RoutingKey))
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second*55)
+			defer cancel()
+			if c.consumeCounter != nil {
+				c.consumeCounter.Add(ctx, 1)
 			}
-			lg.Warn("rabbit message acked(no handler found)", slog.String("routingKey", msg.RoutingKey))
-			continue
-		} else {
-			ctx, _ := context.WithTimeout(context.Background(), time.Second*55)
-			if err := handler(ctx, msg.Body); err == nil {
+			handler, ok := c.handlers[msg.RoutingKey]
+			if !ok {
+				lg.Warn("no handler found for routingKey", slog.String("routingKey", msg.RoutingKey))
+				if c.failCounter != nil {
+					c.failCounter.Add(ctx, 1)
+				}
 				if err := msg.Ack(false); err != nil {
 					lg.Error("failed to ack message", slog.Any("error", err))
 				}
-				lg.Info("rabbit message acked", slog.String("routingKey", msg.RoutingKey))
-				continue
+				lg.Warn("rabbit message acked(no handler found)", slog.String("routingKey", msg.RoutingKey))
+				return
+			} else {
+				if err := handler(ctx, msg.Body); err == nil {
+					if c.successCounter != nil {
+						c.successCounter.Add(ctx, 1)
+					}
+					if err := msg.Ack(false); err != nil {
+						lg.Error("failed to ack message", slog.Any("error", err))
+					}
+					lg.Info("rabbit message acked", slog.String("routingKey", msg.RoutingKey))
+					return
+				} else {
+					if c.failCounter != nil {
+						c.failCounter.Add(ctx, 1)
+					}
+					if err := msg.Nack(false, true); err != nil {
+						lg.Error("failed to nack message", slog.Any("error", err))
+						return
+					}
+					lg.Warn("rabbit message nacked", slog.String("routingKey", msg.RoutingKey))
+				}
 			}
-		}
 
-		if err := msg.Nack(false, true); err != nil {
-			lg.Error("failed to nack message", slog.Any("error", err))
-			continue
-		}
-		lg.Warn("rabbit message nacked", slog.String("routingKey", msg.RoutingKey))
+		}()
 	}
 }

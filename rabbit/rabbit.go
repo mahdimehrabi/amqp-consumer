@@ -2,19 +2,20 @@ package rabbit
 
 import (
 	"errors"
-	"github.com/rabbitmq/amqp091-go"
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/rabbitmq/amqp091-go"
 )
 
 type ConsumerRunner struct {
-	consumers []Consumer
+	consumers []*Consumer
 	lg        *slog.Logger
 	channel   *amqp091.Channel
 }
 
-func NewConsumerRunner(lg *slog.Logger, consumers ...Consumer) *ConsumerRunner {
+func NewConsumerRunner(lg *slog.Logger, consumers ...*Consumer) *ConsumerRunner {
 	return &ConsumerRunner{
 		consumers: consumers,
 		lg:        lg,
@@ -36,7 +37,7 @@ func (cr *ConsumerRunner) Setup(ch *amqp091.Channel) error {
 			return err
 		}
 	}
-
+	go cr.RunInnerWorkers()
 	return cr.startWorkers()
 }
 
@@ -53,10 +54,9 @@ type Rabbit struct {
 	eventExchange    string
 	internalExchange string
 	connectionString string
-
-	lg        *slog.Logger
-	connected bool
-	Mutex     sync.RWMutex
+	lg               *slog.Logger
+	connected        bool
+	Mutex            sync.RWMutex
 }
 
 func NewRabbit(connectionString string, lg *slog.Logger) *Rabbit {
