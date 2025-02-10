@@ -74,11 +74,11 @@ func (r *Rabbit) Setup(consumerRunner *ConsumerRunner) error {
 		return err
 	}
 
-	if err := r.connect(); err != nil {
+	if err := r.Connect(); err != nil {
 		return err
 	}
 
-	if err := r.setupChannel(); err != nil {
+	if err := r.SetupChannel(); err != nil {
 		return err
 	}
 	if err := consumerRunner.Setup(r.CH); err != nil {
@@ -105,7 +105,7 @@ func (r *Rabbit) cleanup() error {
 	return nil
 }
 
-func (r *Rabbit) connect() error {
+func (r *Rabbit) Connect() error {
 	conn, err := amqp091.Dial(r.connectionString)
 	if err != nil {
 		return err
@@ -114,7 +114,7 @@ func (r *Rabbit) connect() error {
 	return nil
 }
 
-func (r *Rabbit) setupChannel() error {
+func (r *Rabbit) SetupChannel() error {
 	ch, err := r.conn.Channel()
 	if err != nil {
 		return err
