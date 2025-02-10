@@ -60,7 +60,6 @@ type Rabbit struct {
 }
 
 func NewRabbit(connectionString string, lg *slog.Logger) *Rabbit {
-
 	return &Rabbit{
 		connectionString: connectionString,
 		lg:               lg,

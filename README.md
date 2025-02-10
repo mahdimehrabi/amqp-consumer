@@ -10,7 +10,7 @@ Strong rabbitmq consumer runner designed for simplicity of using, stability and 
 	rabbitMQ := rabbit.NewRabbit("amqp://guest:guest@localhost:5672/", logger)
 
     // Create a consumer
-	consumer, err := rabbit.NewRetryConsumer(logger, 1, 1, "queue_name", "consume_name",
+	consumer, err := rabbit.NewConsumer(logger, 1, 1, "queue_name", "consume_name",
         rabbit.WithOtelMetric(meter), // otel meter
     )
 	if err != nil {

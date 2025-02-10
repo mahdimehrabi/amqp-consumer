@@ -67,7 +67,7 @@ func WithOtelMetric(meter metric.Meter) ConsumerConfig {
 	}
 }
 
-func NewRetryConsumer(
+func NewConsumer(
 	l *slog.Logger,
 	queueLength int,
 	workersCount int,
