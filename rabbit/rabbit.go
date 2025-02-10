@@ -56,13 +56,15 @@ type Rabbit struct {
 	connectionString string
 	lg               *slog.Logger
 	connected        bool
+	prefetchCount    int
 	Mutex            sync.RWMutex
 }
 
-func NewRabbit(connectionString string, lg *slog.Logger) *Rabbit {
+func NewRabbit(connectionString string, prefetchCount int, lg *slog.Logger) *Rabbit {
 	return &Rabbit{
 		connectionString: connectionString,
 		lg:               lg,
+		prefetchCount:    prefetchCount,
 	}
 }
 
@@ -121,7 +123,7 @@ func (r *Rabbit) SetupChannel() error {
 	}
 	r.CH = ch
 
-	if err := r.CH.Qos(8, 0, false); err != nil {
+	if err := r.CH.Qos(r.prefetchCount, 0, false); err != nil {
 		return err
 	}
 
