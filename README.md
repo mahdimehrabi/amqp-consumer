@@ -1,6 +1,8 @@
 # amqp-consumer
 
-Strong rabbitmq consumer runner designed for simplicity of using, stability and performance
+RabbitMQ Consumer Toolkit is a lightweight yet robust package that streamlines the setup of RabbitMQ consumers. It offers essential features including:
+Concurrent worker management for optimal message processing, automatic reconnection handling to maintain system reliability, built-in health monitoring capabilities, and integrated OpenTelemetry metrics for comprehensive observability.
+This solution simplifies RabbitMQ consumer implementation while providing the reliability and monitoring features needed in production environments.
 
 ## Usage
 ```go
