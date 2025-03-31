@@ -129,6 +129,12 @@ func (c *Consumer) innerWorker() {
 	lg := c.logger.With("method", "InnerWorker")
 	lg.Info("started Consumer inner worker")
 
+	defer func() {
+		if r := recover(); r != nil {
+			lg.Error("recovered from panic", "panic recovery", r)
+		}
+	}()
+
 	for msg := range c.msgsQueue {
 		func() {
 			lg.Info("rabbit message received in msg queue go channel", slog.String("routingKey", msg.RoutingKey))
