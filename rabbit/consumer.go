@@ -4,10 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/baggage"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type HandlerFunc func(context.Context, []byte) error
@@ -28,6 +33,7 @@ type Consumer struct {
 	consumeCounter metric.Int64Counter
 	successCounter metric.Int64Counter
 	failCounter    metric.Int64Counter
+	tracer         trace.Tracer
 }
 
 func WithQueue(queue amqp091.Queue) ConsumerConfig {
@@ -65,6 +71,41 @@ func WithOtelMetric(meter metric.Meter) ConsumerConfig {
 
 		return nil
 	}
+}
+
+// Add a configuration function to set the tracer
+func WithTracer(tracer trace.Tracer) ConsumerConfig {
+	return func(c *Consumer) error {
+		c.tracer = tracer
+		return nil
+	}
+}
+
+type Carrier amqp091.Table
+
+func (c Carrier) Get(key string) string {
+	v, _ := c[key]
+	switch v := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	case int:
+		return strconv.Itoa(v)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+func (c Carrier) Set(key string, value string) {
+	c[key] = value
+}
+
+func (c Carrier) Keys() []string {
+	keys := []string{}
+	for key, _ := range c {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func NewConsumer(
@@ -109,7 +150,9 @@ func (c *Consumer) Setup(ch *amqp091.Channel) error {
 		return err
 	}
 	c.delivery = d
-
+	if c.tracer == nil {
+		c.tracer = otel.Tracer("rabbitmq/consumer")
+	}
 	return nil
 }
 
@@ -134,12 +177,27 @@ func (c *Consumer) innerWorker() {
 			lg.Error("recovered from panic", "panic recovery", r)
 		}
 	}()
-
+	propagator := otel.GetTextMapPropagator()
 	for msg := range c.msgsQueue {
 		func() {
 			lg.Info("rabbit message received in msg queue go channel", slog.String("routingKey", msg.RoutingKey))
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second*55)
+
+			// Extract the context from the message headers
+			ctx := context.Background()
+			eCtx := propagator.Extract(ctx, Carrier(msg.Headers))
+			spanCtx := trace.SpanContextFromContext(eCtx)
+			bags := baggage.FromContext(eCtx)
+			ctx = baggage.ContextWithBaggage(ctx, bags)
+			ctx, span := c.tracer.Start(
+				trace.ContextWithRemoteSpanContext(ctx, spanCtx),
+				"rabbitmq_message",
+				trace.WithSpanKind(trace.SpanKindConsumer),
+			)
+			defer span.End()
+
+			ctx, cancel := context.WithTimeout(ctx, time.Second*55)
 			defer cancel()
+
 			if c.consumeCounter != nil {
 				c.consumeCounter.Add(ctx, 1)
 			}
@@ -151,6 +209,7 @@ func (c *Consumer) innerWorker() {
 				}
 				if err := msg.Ack(false); err != nil {
 					lg.Error("failed to ack message", slog.Any("error", err))
+					recordTraceError(err, span)
 				}
 				lg.Warn("rabbit message acked(no handler found)", slog.String("routingKey", msg.RoutingKey))
 				return
@@ -161,6 +220,7 @@ func (c *Consumer) innerWorker() {
 					}
 					if err := msg.Ack(false); err != nil {
 						lg.Error("failed to ack message", slog.Any("error", err))
+						recordTraceError(err, span)
 					}
 					lg.Info("rabbit message acked", slog.String("routingKey", msg.RoutingKey))
 					return
@@ -170,6 +230,7 @@ func (c *Consumer) innerWorker() {
 					}
 					if err := msg.Nack(false, true); err != nil {
 						lg.Error("failed to nack message", slog.Any("error", err))
+						recordTraceError(err, span)
 						return
 					}
 					lg.Warn("rabbit message nacked", slog.String("routingKey", msg.RoutingKey))
@@ -177,5 +238,12 @@ func (c *Consumer) innerWorker() {
 			}
 
 		}()
+	}
+}
+
+func recordTraceError(err error, span trace.Span) {
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 	}
 }
