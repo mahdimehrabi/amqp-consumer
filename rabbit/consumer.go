@@ -172,11 +172,6 @@ func (c *Consumer) innerWorker() {
 	lg := c.logger.With("method", "InnerWorker")
 	lg.Info("started Consumer inner worker")
 
-	defer func() {
-		if r := recover(); r != nil {
-			lg.Error("recovered from panic", "panic recovery", r)
-		}
-	}()
 	propagator := otel.GetTextMapPropagator()
 	for msg := range c.msgsQueue {
 		func() {
@@ -193,6 +188,20 @@ func (c *Consumer) innerWorker() {
 				"rabbitmq_message",
 				trace.WithSpanKind(trace.SpanKindConsumer),
 			)
+
+			defer func() {
+				if r := recover(); r != nil {
+					lg.Error("recovered from panic", "panic recovery", r)
+
+					if err := msg.Nack(false, true); err != nil {
+						lg.Error("failed to ack message during panic recovery", slog.Any("error", err))
+						recordTraceError(err, span)
+					} else {
+						lg.Info("message acked during panic recovery", slog.String("routingKey", msg.RoutingKey))
+					}
+				}
+			}()
+
 			defer span.End()
 
 			ctx, cancel := context.WithTimeout(ctx, time.Second*55)
