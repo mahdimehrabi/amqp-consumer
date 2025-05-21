@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -237,7 +238,11 @@ func (c *Consumer) innerWorker() {
 
 			defer func() {
 				if r := recover(); r != nil {
-					lg.Error("recovered from panic", "panic recovery", r)
+					stack := debug.Stack()
+					lg.Error("recovered from panic",
+						"panic", r,
+						"stack", string(stack),
+					)
 
 					if err := msg.Nack(false, true); err != nil {
 						lg.Error("failed to ack message during panic recovery", slog.Any("error", err))
