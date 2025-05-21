@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rabbitmq/amqp091-go"
@@ -16,6 +18,12 @@ import (
 )
 
 type HandlerFunc func(context.Context, []byte) error
+
+type RegexHandler struct {
+	Pattern *regexp.Regexp
+	Handler HandlerFunc
+}
+
 type SetupFunc func(ch *amqp091.Channel) error
 
 type ConsumerConfig func(*Consumer) error
@@ -26,6 +34,7 @@ type Consumer struct {
 	delivery       <-chan amqp091.Delivery
 	logger         *slog.Logger
 	handlers       map[string]HandlerFunc
+	regexHandlers  []RegexHandler
 	msgsQueue      chan amqp091.Delivery
 	queueLength    int
 	workersCount   int
@@ -84,7 +93,7 @@ func WithTracer(tracer trace.Tracer) ConsumerConfig {
 type Carrier amqp091.Table
 
 func (c Carrier) Get(key string) string {
-	v, _ := c[key]
+	v := c[key]
 	switch v := v.(type) {
 	case nil:
 		return ""
@@ -102,7 +111,7 @@ func (c Carrier) Set(key string, value string) {
 
 func (c Carrier) Keys() []string {
 	keys := []string{}
-	for key, _ := range c {
+	for key := range c {
 		keys = append(keys, key)
 	}
 	return keys
@@ -156,8 +165,45 @@ func (c *Consumer) Setup(ch *amqp091.Channel) error {
 	return nil
 }
 
+func rabbitMQWildcardToRegex(pattern string) (*regexp.Regexp, error) {
+	word := `[^.]+`
+
+	// Special case: pattern is exactly "#"
+	if pattern == "#" {
+		// matches zero or more words separated by dots (including empty)
+		return regexp.Compile(`^(` + word + `(\.` + word + `)*)?$`)
+	}
+
+	// Escape dots first
+	pattern = regexp.QuoteMeta(pattern)
+
+	// Replace * with single word wildcard (no dots)
+	pattern = strings.ReplaceAll(pattern, `\*`, `(`+word+`)`)
+
+	// Replace .# with zero or more words preceded by dot
+	pattern = strings.ReplaceAll(pattern, `\.#`, `(\.`+word+`)*`)
+
+	// Replace #. with zero or more words followed by dot
+	pattern = strings.ReplaceAll(pattern, `#\.`, `(`+word+`\.)*`)
+
+	// Replace remaining # with zero or more words with optional dot
+	pattern = strings.ReplaceAll(pattern, `#`, `(`+word+`(\.`+word+`)*)?`)
+
+	return regexp.Compile("^" + pattern + "$")
+}
+
 func (c *Consumer) RegisterHandler(routingKey string, handler HandlerFunc) {
 	c.handlers[routingKey] = handler
+}
+
+// RegisterRegexHandler will register a handler in form of rabbitmq wildcard
+func (c *Consumer) RegisterRegexHandler(pattern string, handler HandlerFunc) error {
+	re, err := rabbitMQWildcardToRegex(pattern)
+	if err != nil {
+		return err
+	}
+	c.regexHandlers = append(c.regexHandlers, RegexHandler{Pattern: re, Handler: handler})
+	return nil
 }
 
 func (c *Consumer) Worker() {
@@ -210,7 +256,18 @@ func (c *Consumer) innerWorker() {
 			if c.consumeCounter != nil {
 				c.consumeCounter.Add(ctx, 1)
 			}
+
 			handler, ok := c.handlers[msg.RoutingKey]
+			if !ok {
+				for _, rh := range c.regexHandlers {
+					if rh.Pattern.MatchString(msg.RoutingKey) {
+						handler = rh.Handler
+						ok = true
+						break
+					}
+				}
+			}
+
 			if !ok {
 				lg.Warn("no handler found for routingKey", slog.String("routingKey", msg.RoutingKey))
 				if c.failCounter != nil {
