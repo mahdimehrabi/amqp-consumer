@@ -285,6 +285,7 @@ func (c *Consumer) innerWorker() {
 				lg.Warn("rabbit message acked(no handler found)", slog.String("routingKey", msg.RoutingKey))
 				return
 			} else {
+				ctx = SetRoutingInfo(ctx, msg.RoutingKey, msg.Exchange)
 				if err := handler(ctx, msg.Body); err == nil {
 					if c.successCounter != nil {
 						c.successCounter.Add(ctx, 1)

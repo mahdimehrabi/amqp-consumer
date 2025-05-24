@@ -51,6 +51,7 @@ func (cr *ConsumerRunner) startWorkers() error {
 type Rabbit struct {
 	CH               *amqp091.Channel
 	conn             *amqp091.Connection
+	internalExchange string
 	connectionString string
 	lg               *slog.Logger
 	connected        bool
